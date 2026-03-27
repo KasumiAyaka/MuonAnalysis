@@ -1,0 +1,1232 @@
+// 2024/05/09
+// kasumi
+// based on "Check_upstream_base.cpp
+// microのVPH
+
+#pragma comment(lib,"FILE_structure.lib")
+#include <FILE_structure.hpp>
+#include <iomanip>
+
+class output_format {
+public:
+	int groupid, chainid, pl, dpl;
+	double sigma[2], chi2[4], md, dz;
+};
+
+struct kink_cand {
+	int pl, groupid;
+};
+bool operator<(const kink_cand& lhs, const kink_cand& rhs) {
+	return std::tie(lhs.groupid, lhs.pl) < std::tie(rhs.groupid, rhs.pl);
+}
+
+
+void Calc_divide_vph(Momentum_recon::Mom_chain& c, int pl, double& mean, double& sd, int& count, double& vph);
+void Calc_divide_pixel(Momentum_recon::Mom_chain& c, int pl, double& mean, double& sd, int& count, double& hitnum);
+void output_file(std::string filename, std::vector<Momentum_recon::Event_information>& mom, std::vector<output_format>& out, std::multimap<int, int>& kink, double thr_ang, double thr_vph, double thr_md);
+void Calc_divide_angle_lateral(Momentum_recon::Mom_chain& c, int pl, double& dal, double& rms, double& ave, double& sd);
+void Calc_divide_angle_radial(Momentum_recon::Mom_chain& c, int pl, double& dar, double& rms, double& ave, double& sd);
+void output_file_best(std::string filename, std::vector<output_format>& out, std::multimap<int, int>& kink);
+double Calc_md(Momentum_recon::Mom_chain& c, int pl, double& dz);
+void cut_upstream_base(Momentum_recon::Mom_chain& c, int pl);
+void Calc_upstream_and_downsteam(std::vector<Momentum_recon::Event_information>& mom, std::multimap<int, int>& kink, std::string output);
+
+void Calc_divide_vph_inv(Momentum_recon::Mom_chain& c, int pl, double& mean, double& sd, int& count, double& vph);
+void Calc_divide_pixel_inv(Momentum_recon::Mom_chain& c, int pl, double& mean, double& sd, int& count, double& hitnum);
+void Calc_divide_angle_lateral_inv(Momentum_recon::Mom_chain& c, int pl, double& dal, double& rms, double& ave, double& sd);
+void Calc_divide_angle_radial_inv(Momentum_recon::Mom_chain& c, int pl, double& dar, double& rms, double& ave, double& sd);
+double Calc_md_inv(Momentum_recon::Mom_chain& c, int pl, double& dz);
+
+void Culc_dangle_sigma(std::vector<Momentum_recon::Event_information>& mom, std::multimap<int, int>& kink, std::string output);
+void Culc_dangle_sigma_not_kink(std::vector<Momentum_recon::Event_information>& mom, std::multimap<int, int>& kink, std::string output);
+
+
+int main(int argc, char** argv) {
+	if (argc != 5 && argc != 9) {
+		fprintf(stderr, "usage1:file-in-momch chain_all.txt most_kink_point.txt upstream_vs_downstream.txt\n");
+		fprintf(stderr, "usage2:file-in-momch chain_all.txt most_kink_point.txt ud_chain_all.txt upstream_vs_downstream.txt thr_chi2ang thr_chi2VPH  thr_MD\n");
+		fprintf(stderr, "\tex) in.momch out.txt out_mostkinkpoint.txt up_vs_down.txt up_vs_down_sgm.txt thr_chi2ang thr_chi2VPH  thr_MD\n");
+		exit(1);
+	}
+	std::string file_in_momch = argv[1];
+	std::string file_all_linklet = argv[2];//chain all 
+	std::string file_largekink = argv[3];//most kink point
+	std::string file_out_momch = argv[4];//upstream , downstream chain all 
+	std::string file_ud_sigma = "";//upstream vs downstream
+	double thr_ChiAng = 100;
+	double thr_ChiVph = 25;
+	double thr_MD = 100;
+
+	if (argc == 9) {
+		file_ud_sigma = argv[5];//upstream vs downstream
+		thr_ChiAng = std::stod(argv[6]);
+		thr_ChiVph = std::stod(argv[7]);
+		thr_MD = std::stod(argv[8]);
+	}
+
+	std::vector<Momentum_recon::Event_information> momch = Momentum_recon::Read_Event_information_extension(file_in_momch);
+
+	std::vector<output_format>out;
+	std::multimap<int, int> kink;
+	output_file(file_all_linklet, momch, out, kink,thr_ChiAng,thr_ChiVph,thr_MD);//add kink flg, outputしない
+	
+	output_file_best(file_largekink, out, kink); //most kink point
+
+	if (argc == 5) {
+		// 古いバージョンとの互換性のための処置
+		file_ud_sigma = file_out_momch;
+		file_out_momch = file_all_linklet;		
+	}
+	Calc_upstream_and_downsteam(momch,kink, file_out_momch);///upstream , downstream chain all
+
+
+	Culc_dangle_sigma(momch, kink, file_ud_sigma);//upstream vs downstream
+
+
+}
+void output_file(std::string filename, std::vector<Momentum_recon::Event_information>& mom, std::vector<output_format>& out, std::multimap<int, int>& kink, double thr_ang, double thr_vph, double thr_md) {
+	std::ofstream ofs(filename);
+
+	double mean[2], mean_err[2], sd[2], dal, rms_l, dar, rms_r, chi2[4], error, sigma, vph, hitnum,ave[2];
+	int count[2];
+	kink_cand kc;
+	for (auto& ev : mom) {
+
+		for (auto& c : ev.chains) {
+			std::set<int> pl_set;
+			for (auto itr = c.base.begin(); itr != c.base.end(); itr++) {
+				pl_set.insert(itr->pl);
+			}
+			std::vector<int> pl_v(pl_set.begin(), pl_set.end());
+			std::sort(pl_v.begin(), pl_v.end(), std::greater<int>());
+			int pl;
+			for (int i = 1; i < pl_v.size(); i++) {// && i <= 2; i++) {
+				output_format out_tmp;
+				out_tmp.groupid = ev.groupid;
+				out_tmp.chainid = c.chainid;
+				out_tmp.pl = pl_v[i];
+				out_tmp.dpl = pl_v[i - 1] - pl_v[i];
+
+				pl = pl_v[i];
+				Calc_divide_angle_lateral(c, pl, dal, rms_l,ave[0],sd[0]);
+				Calc_divide_angle_radial(c, pl, dar, rms_r,ave[1], sd[1]);
+				if (!isfinite(dal) || !isfinite(dar) || !isfinite(rms_l) || !isfinite(rms_r))continue;
+				chi2[0] = pow(dal / rms_l, 2);
+				chi2[1] = pow(dar / rms_r, 2);
+
+				ofs << std::fixed << std::right
+					<< std::setw(10) << std::setprecision(0) << ev.groupid << " "
+					<< std::setw(10) << std::setprecision(0) << c.chainid << " "
+					<< std::setw(10) << std::setprecision(0) << pl << " ";
+
+				ofs << std::fixed << std::right
+					<< std::setw(8) << std::setprecision(5) << dal << " "
+					<< std::setw(8) << std::setprecision(5) << rms_l << " "
+					<< std::setw(8) << std::setprecision(5) << dar << " "
+					<< std::setw(8) << std::setprecision(5) << rms_r << " ";
+
+
+				Calc_divide_vph(c, pl, mean[0], sd[0], count[0], vph);
+				Calc_divide_pixel(c, pl, mean[1], sd[1], count[1], hitnum);
+				if (sd[0] > 0 && vph > 0) {
+					sigma = (vph - mean[0]) / sd[0];
+					chi2[2] = sigma * sigma;
+				}
+				else {
+					sigma = -1;
+					chi2[2] = -1;
+				}
+				out_tmp.sigma[0] = sigma;
+
+				ofs << std::fixed << std::right
+					<< std::setw(4) << std::setprecision(0) << count[0] << " "
+					<< std::setw(8) << std::setprecision(2) << mean[0] << " "
+					<< std::setw(6) << std::setprecision(3) << sd[0] << " "
+					<< std::setw(8) << std::setprecision(0) << vph << " "
+					<< std::setw(6) << std::setprecision(2) << sigma << " ";
+
+				if (sd[1] > 0 && hitnum > 0) {
+					sigma = (hitnum - mean[1]) / sd[1];
+					chi2[3] = sigma * sigma;
+				}
+				else {
+					sigma = -1;
+					chi2[3] = -1;
+				}
+				out_tmp.sigma[1] = sigma;
+
+				ofs << std::fixed << std::right
+					<< std::setw(4) << std::setprecision(0) << count[1] << " "
+					<< std::setw(8) << std::setprecision(2) << mean[1] << " "
+					<< std::setw(6) << std::setprecision(3) << sd[1] << " "
+					<< std::setw(8) << std::setprecision(0) << hitnum << " "
+					<< std::setw(6) << std::setprecision(2) << sigma << " ";
+				out_tmp.md = Calc_md(c, pl, out_tmp.dz);
+
+				ofs << std::fixed << std::right
+					<< std::setw(10) << std::setprecision(4) << chi2[0] << " "
+					<< std::setw(10) << std::setprecision(4) << chi2[1] << " "
+					<< std::setw(10) << std::setprecision(4) << chi2[2] << " "
+					<< std::setw(10) << std::setprecision(4) << chi2[3] << " "
+					<< std::setw(10) << std::setprecision(4) << out_tmp.md << " "
+					<< std::setw(10) << std::setprecision(4) << out_tmp.dz << " ";
+
+				out_tmp.chi2[0] = chi2[0];
+				out_tmp.chi2[1] = chi2[1];
+				out_tmp.chi2[2] = chi2[2];
+				out_tmp.chi2[3] = chi2[3];
+				//if (out_tmp.sigma[0] < 0)continue;
+				//if (out_tmp.sigma[1] < 0)continue;
+				if (chi2[0] + chi2[1] > thr_ang || chi2[2] > thr_vph || out_tmp.md > thr_md) {
+					//if (pl > 10 || fabs(*pl_v.end() - pl) < 5) {
+						kc.groupid = ev.groupid;
+						kc.pl = pl;
+						kink.insert(std::make_pair(kc.groupid, kc.pl));
+						ofs << std::fixed << std::right
+							<< std::setw(3) << std::setprecision(0) << 1 << std::endl;
+
+					//}
+				}
+				else {
+					ofs << std::fixed << std::right
+						<< std::setw(3) << std::setprecision(0) << 0 << std::endl;
+
+				}
+
+				out.push_back(out_tmp);
+
+			}
+		}
+
+	}
+}
+void output_file_best(std::string filename, std::vector<output_format>& out, std::multimap<int, int>& kink) {
+	std::multimap<int, output_format> out_map;
+	for (auto itr = out.begin(); itr != out.end(); itr++) {
+		//if (itr->sigma[0] < 0)continue;
+		//if (itr->sigma[1] < 0)continue;
+		out_map.insert(std::make_pair(itr->groupid, *itr));
+	}
+	std::ofstream ofs(filename);
+
+	for (auto itr = out_map.begin(); itr != out_map.end(); itr = std::next(itr, out_map.count(itr->first))) {
+		std::vector<output_format> out_v;
+		auto range = out_map.equal_range(itr->first);
+		for (auto res = range.first; res != range.second; res++) {
+			out_v.push_back(res->second);
+		}
+
+
+		double max_chi2 = 0;
+		output_format out_pl;
+		for (auto itr2 = out_v.begin(); itr2 != out_v.end(); itr2++) {
+			if (max_chi2 < itr2->chi2[0] + itr2->chi2[1] + itr2->chi2[2]) {
+				max_chi2 = itr2->chi2[0] + itr2->chi2[1] + itr2->chi2[2];
+				out_pl = *itr2;
+			}
+		}
+		ofs << std::fixed << std::right
+			<< std::setw(10) << std::setprecision(0) << out_pl.groupid << " "
+			<< std::setw(10) << std::setprecision(0) << out_pl.chainid << " "
+			<< std::setw(10) << std::setprecision(0) << out_pl.pl << " "
+			<< std::setw(10) << std::setprecision(0) << out_pl.dpl << " "
+			<< std::setw(8) << std::setprecision(3) << out_pl.sigma[0] << " "
+			<< std::setw(8) << std::setprecision(3) << out_pl.sigma[1] << " "
+			<< std::setw(10) << std::setprecision(4) << out_pl.chi2[0] << " "
+			<< std::setw(10) << std::setprecision(4) << out_pl.chi2[1] << " "
+			<< std::setw(10) << std::setprecision(4) << out_pl.chi2[2] << " "
+			<< std::setw(10) << std::setprecision(4) << out_pl.chi2[3] << " "
+			<< std::setw(10) << std::setprecision(4) << out_pl.md << " "
+			<< std::setw(10) << std::setprecision(4) << out_pl.dz << std::endl;
+
+		if (kink.find(out_pl.groupid) != kink.end()) {// すでにdetectされている場合
+			auto p = kink.equal_range(out_pl.groupid);
+			for (auto itr_p = p.first; itr_p != p.second; itr_p++) {
+				if (itr_p->second != out_pl.pl) {
+					kink.insert(std::make_pair(out_pl.groupid, out_pl.pl));
+
+				}
+			}
+
+		}
+		else {
+			kink.insert(std::make_pair(out_pl.groupid, out_pl.pl));
+		}
+
+	}
+
+}
+
+
+
+void Calc_divide_vph(Momentum_recon::Mom_chain& c, int pl, double& mean, double& sd, int& count, double& vph) {
+	vph = -1;
+	count = 0;
+	double sum2 = 0, sum1 = 0;
+	bool flg = true;
+	for (auto itr = c.base.begin(); itr != c.base.end(); itr++) {
+		if (itr->pl <= pl) {
+			for (int i = 0; i < 2; i++) {
+				count += 1;
+				sum1 += itr->m[i].ph % 10000;
+				sum2 += pow(itr->m[i].ph % 10000, 2);
+			}
+		}
+		else {
+			if (flg) {
+				vph = (itr->m[0].ph % 10000 + itr->m[1].ph % 10000) / 2;
+				flg = false;
+
+			}
+		}
+	}
+	if (count < 2) {
+		mean = -1;
+		sd = -1;
+	}
+	else {
+		mean = sum1 / count;
+		sd = sum2 / count - mean * mean;
+		if (sd <= 0) {
+			mean = -1;
+			sd = -1;
+		}
+		else {
+			sd = sqrt(sd) * sqrt(count - 1) / sqrt(count);
+		}
+
+	}
+}
+void Calc_divide_pixel(Momentum_recon::Mom_chain& c, int pl, double& mean, double& sd, int& count, double& hitnum) {
+	hitnum = -1;
+	count = 0;
+	double sum2 = 0., sum1 = 0;
+	bool flg = true;
+	for (auto itr = c.base.begin(); itr != c.base.end(); itr++) {
+		if (itr->pl <= pl) {
+			for (int i = 0; i < 2; i++) {
+				if (itr->m[i].hitnum < 0)continue;
+				count += 1;
+				sum1 += itr->m[i].hitnum;
+				sum2 += pow(itr->m[i].hitnum, 2);
+			}
+		}
+		else {
+			if (flg) {
+				if (itr->m[0].hitnum > 0 && itr->m[1].hitnum > 0) {
+					hitnum = (itr->m[0].hitnum + itr->m[1].hitnum) / 2;
+				}
+				else if (itr->m[0].hitnum > 0) {
+					hitnum = itr->m[0].hitnum;
+				}
+				else if (itr->m[1].hitnum > 0) {
+					hitnum = itr->m[1].hitnum;
+				}
+				else {
+					hitnum = -1;
+				}
+				flg = false;
+			}
+		}
+	}
+	if (count < 2) {
+		mean = -1;
+		sd = -1;
+	}
+	else {
+		mean = sum1 / count;
+		sd = sum2 / count - mean * mean;
+		if (sd <= 0) {
+			mean = -1;
+			sd = -1;
+		}
+		else {
+			sd = sqrt(sd) * sqrt(count - 1) / sqrt(count);
+		}
+
+	}
+}
+void Calc_divide_angle_lateral(Momentum_recon::Mom_chain& c, int pl, double& dal, double& rms, double& ave, double& sd) {
+	dal = NAN;
+
+	double ax, ay, dax, day, dang, angle, sum2 = 0,sum1=0;
+	int count = 0;
+	for (auto itr = c.base_pair.begin(); itr != c.base_pair.end(); itr++) {
+		//std::cout << "nor\npl_first=" << itr->first.pl << "\tpl_second=" << itr->second.pl << std::endl;
+		//pl:first<second
+		ax = itr->first.ax;
+		ay = itr->first.ay;
+		angle = sqrt(ax * ax + ay * ay);
+		dax = itr->second.ax - ax;
+		day = itr->second.ay - ay;
+		if (angle < 0.01) {
+			dang = dax;
+		}
+		else {
+			dang = (dax * ay - day * ax) / angle;
+		}
+		if (itr->first.pl == pl) {
+			dal = dang;
+		}
+		else if (itr->second.pl <= pl) {
+			sum2 += dang * dang;
+			sum1 += dang;
+			count++;
+		}
+	}
+	if (count <= 1) {
+		rms = NAN;
+	}
+	else {
+		rms = sqrt(sum2 / count);
+		ave = sum1 / count;
+		sd = sum2 / count - ave * ave;
+		if (sd <= 0) {
+			ave = -1;
+			sd = -1;
+		}
+		else {
+			sd = sqrt(sd) * sqrt(count - 1) / sqrt(count);
+		}
+	}
+
+
+}
+void Calc_divide_angle_radial(Momentum_recon::Mom_chain& c, int pl, double& dar, double& rms, double& ave, double& sd) {
+	dar = NAN;
+	double ax, ay, dax, day, dang, angle, sum2 = 0,sum1 = 0;
+	int count = 0;
+	for (auto itr = c.base_pair.begin(); itr != c.base_pair.end(); itr++) {//pl:small-->large
+		ax = itr->first.ax;
+		ay = itr->first.ay;
+		angle = sqrt(ax * ax + ay * ay);
+		dax = itr->second.ax - ax;
+		day = itr->second.ay - ay;
+		if (angle < 0.01) {
+			dang = day;
+		}
+		else {
+			dang = (dax * ax + day * ay) / angle;
+		}
+		if (itr->first.pl == pl) {//pl-->kink手前, pl+1--pl=kink
+			dar = dang;
+		}
+		else if (itr->second.pl <= pl) {
+			sum2 += dang * dang;
+			sum1 += dang;
+			count++;
+		}
+	}
+	if (count <= 1) {
+		rms = NAN;
+	}
+	else {
+		rms = sqrt(sum2 / count);
+		ave = sum1 / count;
+		sd = sum2 / count - ave * ave;
+		if (sd <= 0) {
+			ave = -1;
+			sd = -1;
+		}
+		else {
+			sd = sqrt(sd) * sqrt(count - 1) / sqrt(count);
+		}
+	}
+
+}
+double Calc_md(Momentum_recon::Mom_chain& c, int pl, double& dz) {
+	double md = -1;
+	for (auto itr = c.base_pair.begin(); itr != c.base_pair.end(); itr++) {
+		if (pl == itr->first.pl) {
+			matrix_3D::vector_3D pos0, pos1, dir0, dir1;
+			pos0.x = itr->first.x;
+			pos0.y = itr->first.y;
+			pos0.z = itr->first.z;
+			dir0.x = itr->first.ax;
+			dir0.y = itr->first.ay;
+			dir0.z = 1;
+			pos1.x = itr->second.x;
+			pos1.y = itr->second.y;
+			pos1.z = itr->second.z;
+			dir1.x = itr->second.ax;
+			dir1.y = itr->second.ay;
+			dir1.z = 1;
+			double extra[2], z_range[2];
+			z_range[0] = pos0.z;
+			z_range[1] = pos1.z;
+			md = matrix_3D::minimum_distance(pos0, pos1, dir0, dir1, z_range, extra);
+			dz = (fabs(extra[0]) + fabs(extra[1])) / 2;
+			return md;
+
+		}
+	}
+	return md;
+}
+
+void Calc_upstream_and_downsteam(std::vector<Momentum_recon::Event_information>& mom, std::multimap<int, int>& kink,std::string output) {
+	std::ofstream ofs(output);
+	std::vector<Momentum_recon::Mom_chain> ret;
+	double mean[2], mean_err[2], sd[2], dal, rms_l, dar, rms_r, chi2[4], error, sigma, vph, hitnum, md,ave[2];
+	int count[2];
+	int flg = 0;
+	int cnt = 0;
+	//ofs << " groupid pl angle vph md" << std::endl;
+	for (auto& ev : mom) {
+		for (auto& c : ev.chains) {
+			std::set<int> pl_set;
+			for (auto itr = c.base.begin(); itr != c.base.end(); itr++) {
+				pl_set.insert(itr->pl);
+			}
+			std::vector<int> pl_v(pl_set.begin(), pl_set.end());
+			std::sort(pl_v.begin(), pl_v.end(), std::greater<int>());
+
+
+			int pl,pl0;
+			auto itr0 = kink.equal_range(ev.groupid);
+
+			for (auto itr = itr0.first; itr != itr0.second; itr++) {
+				pl0 = itr->second;
+
+
+				for (int i = 1; i < pl0; i++) {
+					//upstream
+
+					output_format out_tmp;
+					out_tmp.groupid = ev.groupid;
+					out_tmp.chainid = c.chainid;
+					out_tmp.pl = pl_v[i];
+					out_tmp.dpl = pl_v[i - 1] - pl_v[i];
+
+					pl = pl_v[i];
+					Calc_divide_angle_lateral(c, pl, dal, rms_l,ave[0], sd[0]);
+					Calc_divide_angle_radial(c, pl, dar, rms_r,ave[1], sd[1]);
+					if (!isfinite(dal) || !isfinite(dar) || !isfinite(rms_l) || !isfinite(rms_r))continue;
+					chi2[0] = pow(dal / rms_l, 2);
+					chi2[1] = pow(dar / rms_r, 2);
+
+					Calc_divide_vph(c, pl, mean[0], sd[0], count[0], vph);
+					Calc_divide_pixel(c, pl, mean[1], sd[1], count[1], hitnum);
+					if (sd[0] > 0 && vph > 0) {
+						sigma = (vph - mean[0]) / sd[0];
+						chi2[2] = sigma * sigma;
+					}
+					else {
+						sigma = -1;
+						chi2[2] = -1;
+					}
+					out_tmp.sigma[0] = sigma;
+
+
+
+					if (sd[1] > 0 && hitnum > 0) {
+						sigma = (hitnum - mean[1]) / sd[1];
+						chi2[3] = sigma * sigma;
+					}
+					else {
+						sigma = -1;
+						chi2[3] = -1;
+					}
+					out_tmp.sigma[1] = sigma;
+
+
+					out_tmp.dz;
+					out_tmp.md = Calc_md(c, pl, out_tmp.dz);
+
+					out_tmp.chi2[0] = chi2[0];
+					out_tmp.chi2[1] = chi2[1];
+					out_tmp.chi2[2] = chi2[2];
+					out_tmp.chi2[3] = chi2[3];
+
+					ofs << std::fixed << std::right
+						<< std::setw(10) << std::setprecision(0) << ev.groupid << " "
+						<< std::setw(10) << std::setprecision(0) << c.chainid << " "
+						<< std::setw(10) << std::setprecision(0) << pl << " "
+						<< std::setw(2) << std::setprecision(0) << 1 << " ";
+
+					ofs << std::fixed << std::right
+						<< std::setw(8) << std::setprecision(5) << dal << " "
+						<< std::setw(8) << std::setprecision(5) << rms_l << " "
+						<< std::setw(8) << std::setprecision(5) << dar << " "
+						<< std::setw(8) << std::setprecision(5) << rms_r << " ";
+
+					ofs << std::fixed << std::right
+						<< std::setw(4) << std::setprecision(0) << count[0] << " "
+						<< std::setw(8) << std::setprecision(2) << mean[0] << " "
+						<< std::setw(6) << std::setprecision(3) << sd[0] << " "
+						<< std::setw(8) << std::setprecision(0) << vph << " "
+						<< std::setw(6) << std::setprecision(2) << out_tmp.sigma[0] << " ";
+
+					ofs << std::fixed << std::right
+						<< std::setw(4) << std::setprecision(0) << count[1] << " "
+						<< std::setw(8) << std::setprecision(2) << mean[1] << " "
+						<< std::setw(6) << std::setprecision(3) << sd[1] << " "
+						<< std::setw(8) << std::setprecision(0) << hitnum << " "
+						<< std::setw(6) << std::setprecision(2) << out_tmp.sigma[1] << " ";
+
+					ofs << std::fixed << std::right
+						<< std::setw(10) << std::setprecision(4) << chi2[0] << " "
+						<< std::setw(10) << std::setprecision(4) << chi2[1] << " "
+						<< std::setw(10) << std::setprecision(4) << chi2[2] << " "
+						<< std::setw(10) << std::setprecision(4) << chi2[3] << " "
+						<< std::setw(10) << std::setprecision(4) << out_tmp.md << " "
+						<< std::setw(10) << std::setprecision(4) << out_tmp.dz << std::endl;
+
+					//						cut_upstream_base(c, pl);
+					//printf("eventid %d\n", ev.groupid);
+
+				}
+				for (int i = pl_v.size() - 2; i >= pl0; i--) {
+					//downstream
+
+					output_format out_tmp;
+					out_tmp.groupid = ev.groupid;
+					out_tmp.chainid = c.chainid;
+					out_tmp.pl = pl_v[i];
+					out_tmp.dpl = pl_v[i] - pl_v[i]-1;
+
+					pl = pl_v[i];
+					Calc_divide_angle_lateral_inv(c, pl, dal, rms_l,ave[0], sd[0]);
+					Calc_divide_angle_radial_inv(c, pl, dar, rms_r,ave[1], sd[1]);
+					if (!isfinite(dal) || !isfinite(dar) || !isfinite(rms_l) || !isfinite(rms_r))continue;
+					chi2[0] = pow(dal / rms_l, 2);
+					chi2[1] = pow(dar / rms_r, 2);
+
+					Calc_divide_vph_inv(c, pl, mean[0], sd[0], count[0], vph);
+					Calc_divide_pixel_inv(c, pl, mean[1], sd[1], count[1], hitnum);
+					if (sd[0] > 0 && vph > 0) {
+						sigma = (vph - mean[0]) / sd[0];
+						chi2[2] = sigma * sigma;
+					}
+					else {
+						sigma = -1;
+						chi2[2] = -1;
+					}
+					out_tmp.sigma[0] = sigma;
+
+					if (sd[1] > 0 && hitnum > 0) {
+						sigma = (hitnum - mean[1]) / sd[1];
+						chi2[3] = sigma * sigma;
+					}
+					else {
+						sigma = -1;
+						chi2[3] = -1;
+					}
+					out_tmp.sigma[1] = sigma;
+					out_tmp.dz;
+					out_tmp.md = Calc_md(c, pl, out_tmp.dz);
+
+					out_tmp.chi2[0] = chi2[0];
+					out_tmp.chi2[1] = chi2[1];
+					out_tmp.chi2[2] = chi2[2];
+					out_tmp.chi2[3] = chi2[3];
+
+					ofs << std::fixed << std::right
+						<< std::setw(10) << std::setprecision(0) << ev.groupid << " "
+						<< std::setw(10) << std::setprecision(0) << c.chainid << " "
+						<< std::setw(10) << std::setprecision(0) << pl << " ";
+					if (pl == pl0) {
+						ofs<< std::setw(2) << std::setprecision(0) << 0 << " ";
+					}
+					else {
+						ofs << std::setw(2) << std::setprecision(0) << 2 << " ";
+					}
+					ofs << std::fixed << std::right
+						<< std::setw(8) << std::setprecision(5) << dal << " "
+						<< std::setw(8) << std::setprecision(5) << rms_l << " "
+						<< std::setw(8) << std::setprecision(5) << dar << " "
+						<< std::setw(8) << std::setprecision(5) << rms_r << " ";
+
+					ofs << std::fixed << std::right
+						<< std::setw(4) << std::setprecision(0) << count[0] << " "
+						<< std::setw(8) << std::setprecision(2) << mean[0] << " "
+						<< std::setw(6) << std::setprecision(3) << sd[0] << " "
+						<< std::setw(8) << std::setprecision(0) << vph << " "
+						<< std::setw(6) << std::setprecision(2) << out_tmp.sigma[0] << " ";
+
+					ofs << std::fixed << std::right
+						<< std::setw(4) << std::setprecision(0) << count[1] << " "
+						<< std::setw(8) << std::setprecision(2) << mean[1] << " "
+						<< std::setw(6) << std::setprecision(3) << sd[1] << " "
+						<< std::setw(8) << std::setprecision(0) << hitnum << " "
+						<< std::setw(6) << std::setprecision(2) << out_tmp.sigma[1] << " ";
+
+					ofs << std::fixed << std::right
+						<< std::setw(10) << std::setprecision(4) << chi2[0] << " "
+						<< std::setw(10) << std::setprecision(4) << chi2[1] << " "
+						<< std::setw(10) << std::setprecision(4) << chi2[2] << " "
+						<< std::setw(10) << std::setprecision(4) << chi2[3] << " "
+						<< std::setw(10) << std::setprecision(4) << out_tmp.md << " "
+						<< std::setw(10) << std::setprecision(4) << out_tmp.dz << std::endl;
+
+
+					//						cut_upstream_base(c, pl);
+					//printf("eventid %d\n", ev.groupid);
+				}
+			}
+		}
+
+	}
+	ofs << "kink_cand total : " << kink.size() << std::endl;
+	std::cout << kink.size() << std::endl;
+}
+void cut_upstream_base(Momentum_recon::Mom_chain& c, int pl) {
+	for (auto itr = c.base.begin(); itr != c.base.end();) {
+		if (itr->pl > pl) {
+			itr = c.base.erase(itr);
+		}
+		else {
+			itr++;
+		}
+	}
+	for (auto itr = c.base_pair.begin(); itr != c.base_pair.end();) {
+		if (itr->first.pl >= pl) {
+			itr = c.base_pair.erase(itr);
+		}
+		else {
+			itr++;
+		}
+	}
+}
+void Culc_dangle_sigma(std::vector<Momentum_recon::Event_information>& mom, std::multimap<int, int>& kink, std::string output) {
+	
+	std::ofstream ofs(output);
+	std::vector<Momentum_recon::Mom_chain> ret;
+	double mean[2], mean_err[2], sd[2], dal, rms_l, dar, rms_r, chi2[4], error, sigma0, vph, hitnum, md,asd[2];
+	int count[2];
+	int cnt = 0;
+	double dz,sigma[2];
+	double ave[2];
+	//ofs << " groupid pl angle vph md" << std::endl;
+	
+	for (auto& ev : mom) {
+		for (auto& c : ev.chains) {
+
+			int pl, kinkpl;
+			auto itr0 = kink.equal_range(ev.groupid);
+
+			for (auto itr = itr0.first; itr != itr0.second; itr++) {
+				kinkpl = itr->second;
+
+				//upstream
+				Calc_divide_angle_lateral(c, kinkpl, dal, rms_l, ave[0], asd[0]);
+				Calc_divide_angle_radial(c, kinkpl, dar, rms_r, ave[1], asd[1]);
+				if (!isfinite(dal) || !isfinite(dar) || !isfinite(rms_l) || !isfinite(rms_r))continue;
+				//downstream
+				Calc_divide_angle_lateral_inv(c, kinkpl, dal, rms_l, ave[0], asd[0]);
+				Calc_divide_angle_radial_inv(c, kinkpl, dar, rms_r, ave[1], asd[1]);
+				if (!isfinite(dal) || !isfinite(dar) || !isfinite(rms_l) || !isfinite(rms_r))continue;
+
+
+				ofs << std::fixed << std::right
+					<< std::setw(10) << std::setprecision(0) << ev.groupid << " "
+					//<< std::setw(10) << std::setprecision(0) << c.chainid << " "
+					<< std::setw(10) << std::setprecision(0) << kinkpl << " ";
+
+
+				//upstream
+				{
+					Calc_divide_angle_lateral(c, kinkpl, dal, rms_l, ave[0], asd[0]);
+					Calc_divide_angle_radial(c, kinkpl, dar, rms_r, ave[1], asd[1]);
+					if (!isfinite(dal) || !isfinite(dar) || !isfinite(rms_l) || !isfinite(rms_r))continue;
+					chi2[0] = pow(dal / rms_l, 2);
+					chi2[1] = pow(dar / rms_r, 2);
+
+					Calc_divide_vph(c, kinkpl, mean[0], sd[0], count[0], vph);
+					if (sd[0] > 0 && vph > 0) {
+						sigma0 = (vph - mean[0]) / sd[0];
+						chi2[2] = sigma0 * sigma0;
+					}
+					else {
+						sigma0 = -1;
+						chi2[2] = -1;
+					}
+					sigma[0] = sigma0;
+					//Calc_divide_pixel(c, kinkpl, mean[1], sd[1], count[1], hitnum);
+					//if (sd[1] > 0 && hitnum > 0) {
+					//	sigma0 = (hitnum - mean[1]) / sd[1];
+					//	chi2[3] = sigma0 * sigma0;
+					//}
+					//else {
+					//	sigma0 = -1;
+					//	chi2[3] = -1;
+					//}
+					//sigma[1] = sigma0;
+					md = Calc_md(c, kinkpl, dz);
+					ofs << std::fixed << std::right
+						<< std::setw(8) << std::setprecision(5) << ave[0] << " "
+						<< std::setw(8) << std::setprecision(5) << asd[0] << " "
+						<< std::setw(8) << std::setprecision(5) << rms_l << " "
+						<< std::setw(8) << std::setprecision(5) << ave[1] << " "
+						<< std::setw(8) << std::setprecision(5) << asd[1] << " "
+						<< std::setw(8) << std::setprecision(5) << rms_r << " ";
+
+					ofs << std::fixed << std::right
+						//<< std::setw(4) << std::setprecision(0) << count[0] << " "
+						<< std::setw(8) << std::setprecision(2) << mean[0] << " "
+						<< std::setw(6) << std::setprecision(3) << sd[0] << " "
+						//<< std::setw(8) << std::setprecision(2) << vph << " "
+						<< std::setw(6) << std::setprecision(2) << sigma[0] << " ";
+
+					//ofs << std::fixed << std::right
+					//	<< std::setw(4) << std::setprecision(0) << count[1] << " "
+					//	<< std::setw(8) << std::setprecision(2) << mean[1] << " "
+					//	<< std::setw(6) << std::setprecision(3) << sd[1] << " "
+					//	<< std::setw(8) << std::setprecision(2) << hitnum << " "
+					//	<< std::setw(6) << std::setprecision(2) << sigma[1] << " ";
+
+					ofs << std::fixed << std::right
+						<< std::setw(10) << std::setprecision(4) << chi2[0] << " "
+						<< std::setw(10) << std::setprecision(4) << chi2[1] << " "
+						<< std::setw(10) << std::setprecision(4) << chi2[2] << " ";
+					//<< std::setw(10) << std::setprecision(4) << chi2[3] << " "
+				}
+
+				//downstream
+				{
+					Calc_divide_angle_lateral_inv(c, kinkpl, dal, rms_l, ave[0], asd[0]);
+					Calc_divide_angle_radial_inv(c, kinkpl, dar, rms_r, ave[1], asd[1]);
+					if (!isfinite(dal) || !isfinite(dar) || !isfinite(rms_l) || !isfinite(rms_r))continue;
+					chi2[0] = pow(dal / rms_l, 2);
+					chi2[1] = pow(dar / rms_r, 2);
+
+					Calc_divide_vph_inv(c, kinkpl, mean[0], sd[0], count[0], vph);
+					if (sd[0] > 0 && vph > 0) {
+						sigma0 = (vph - mean[0]) / sd[0];
+						chi2[2] = sigma0 * sigma0;
+					}
+					else {
+						sigma0 = -1;
+						chi2[2] = -1;
+					}
+					sigma[0] = sigma0;
+					Calc_divide_pixel_inv(c, kinkpl, mean[1], sd[1], count[1], hitnum);
+					if (sd[1] > 0 && hitnum > 0) {
+						sigma0 = (hitnum - mean[1]) / sd[1];
+						chi2[3] = sigma0 * sigma0;
+					}
+					else {
+						sigma0 = -1;
+						chi2[3] = -1;
+					}
+					sigma[1] = sigma0;
+					md = Calc_md_inv(c, kinkpl, dz);
+					ofs << std::fixed << std::right
+						<< std::setw(8) << std::setprecision(5) << ave[0] << " "
+						<< std::setw(8) << std::setprecision(5) << asd[0] << " "
+						<< std::setw(8) << std::setprecision(5) << rms_l << " "
+						<< std::setw(8) << std::setprecision(5) << ave[1] << " "
+						<< std::setw(8) << std::setprecision(5) << asd[1] << " "
+						<< std::setw(8) << std::setprecision(5) << rms_r << " ";
+
+					ofs << std::fixed << std::right
+						//<< std::setw(4) << std::setprecision(0) << count[0] << " "
+						<< std::setw(8) << std::setprecision(2) << mean[0] << " "
+						<< std::setw(6) << std::setprecision(3) << sd[0] << " "
+						//<< std::setw(8) << std::setprecision(2) << vph << " "
+						<< std::setw(6) << std::setprecision(2) << sigma[0] << " ";
+
+					//ofs << std::fixed << std::right
+					//	<< std::setw(4) << std::setprecision(0) << count[1] << " "
+					//	<< std::setw(8) << std::setprecision(2) << mean[1] << " "
+					//	<< std::setw(6) << std::setprecision(3) << sd[1] << " "
+					//	<< std::setw(8) << std::setprecision(2) << hitnum << " "
+					//	<< std::setw(6) << std::setprecision(2) << sigma[1] << " ";
+
+					ofs << std::fixed << std::right
+						<< std::setw(10) << std::setprecision(4) << chi2[0] << " "
+						<< std::setw(10) << std::setprecision(4) << chi2[1] << " "
+						<< std::setw(10) << std::setprecision(4) << chi2[2] << " ";
+					//<< std::setw(10) << std::setprecision(4) << chi2[3] << " "
+				}
+				//kink angle
+				ofs << std::fixed << std::right
+					<< std::setw(10) << std::setprecision(4) << dal << " "
+					<< std::setw(10) << std::setprecision(4) << dar << " "
+					<< std::setw(10) << std::setprecision(4) << md << " "
+					<< std::setw(10) << std::setprecision(4) << dz <<" "
+					//<< std::setw(10) << std::setprecision(4) << flg
+					<< std::endl;
+
+
+			}
+		}
+
+	}
+}
+
+void Culc_dangle_sigma_not_kink(std::vector<Momentum_recon::Event_information>& mom, std::multimap<int, int>& kink, std::string output) {
+
+	std::ofstream ofs(output);
+	std::vector<Momentum_recon::Mom_chain> ret;
+	double mean[2], mean_err[2], sd[2], dal, rms_l, dar, rms_r, chi2[4], error, sigma0, vph, hitnum, md, asd[2];
+	int count[2];
+	int flg = 0;
+	int cnt = 0;
+	double dz, sigma[2];
+	double ave[2];
+	//ofs << " groupid pl angle vph md" << std::endl;
+
+	for (auto& ev : mom) {
+		for (auto& c : ev.chains) {
+
+			auto itr0 = kink.find(ev.groupid);
+			if (itr0 == kink.end()) {
+
+				int pl;
+				int kinkpl = (c.base.begin()->pl + c.base.size() / 2);
+
+
+				//upstream
+				Calc_divide_angle_lateral(c, kinkpl, dal, rms_l, ave[0], asd[0]);
+				Calc_divide_angle_radial(c, kinkpl, dar, rms_r, ave[1], asd[1]);
+				if (!isfinite(dal) || !isfinite(dar) || !isfinite(rms_l) || !isfinite(rms_r))continue;
+				//downstream
+				Calc_divide_angle_lateral_inv(c, kinkpl, dal, rms_l, ave[0], asd[0]);
+				Calc_divide_angle_radial_inv(c, kinkpl, dar, rms_r, ave[1], asd[1]);
+				if (!isfinite(dal) || !isfinite(dar) || !isfinite(rms_l) || !isfinite(rms_r))continue;
+
+
+				ofs << std::fixed << std::right
+					<< std::setw(10) << std::setprecision(0) << ev.groupid << " "
+					//<< std::setw(10) << std::setprecision(0) << c.chainid << " "
+					<< std::setw(10) << std::setprecision(0) << kinkpl << " ";
+
+
+				//upstream
+				{
+					Calc_divide_angle_lateral(c, kinkpl, dal, rms_l, ave[0], asd[0]);
+					Calc_divide_angle_radial(c, kinkpl, dar, rms_r, ave[1], asd[1]);
+					if (!isfinite(dal) || !isfinite(dar) || !isfinite(rms_l) || !isfinite(rms_r))continue;
+					chi2[0] = pow(dal / rms_l, 2);
+					chi2[1] = pow(dar / rms_r, 2);
+
+					Calc_divide_vph(c, kinkpl, mean[0], sd[0], count[0], vph);
+					if (sd[0] > 0 && vph > 0) {
+						sigma0 = (vph - mean[0]) / sd[0];
+						chi2[2] = sigma0 * sigma0;
+					}
+					else {
+						sigma0 = -1;
+						chi2[2] = -1;
+					}
+					sigma[0] = sigma0;
+					//Calc_divide_pixel(c, kinkpl, mean[1], sd[1], count[1], hitnum);
+					//if (sd[1] > 0 && hitnum > 0) {
+					//	sigma0 = (hitnum - mean[1]) / sd[1];
+					//	chi2[3] = sigma0 * sigma0;
+					//}
+					//else {
+					//	sigma0 = -1;
+					//	chi2[3] = -1;
+					//}
+					//sigma[1] = sigma0;
+					md = Calc_md(c, kinkpl, dz);
+					ofs << std::fixed << std::right
+						<< std::setw(8) << std::setprecision(5) << ave[0] << " "
+						<< std::setw(8) << std::setprecision(5) << asd[0] << " "
+						<< std::setw(8) << std::setprecision(5) << rms_l << " "
+						<< std::setw(8) << std::setprecision(5) << ave[1] << " "
+						<< std::setw(8) << std::setprecision(5) << asd[1] << " "
+						<< std::setw(8) << std::setprecision(5) << rms_r << " ";
+
+					ofs << std::fixed << std::right
+						//<< std::setw(4) << std::setprecision(0) << count[0] << " "
+						<< std::setw(8) << std::setprecision(2) << mean[0] << " "
+						<< std::setw(6) << std::setprecision(3) << sd[0] << " "
+						//<< std::setw(8) << std::setprecision(2) << vph << " "
+						<< std::setw(6) << std::setprecision(2) << sigma[0] << " ";
+
+					//ofs << std::fixed << std::right
+					//	<< std::setw(4) << std::setprecision(0) << count[1] << " "
+					//	<< std::setw(8) << std::setprecision(2) << mean[1] << " "
+					//	<< std::setw(6) << std::setprecision(3) << sd[1] << " "
+					//	<< std::setw(8) << std::setprecision(2) << hitnum << " "
+					//	<< std::setw(6) << std::setprecision(2) << sigma[1] << " ";
+
+					ofs << std::fixed << std::right
+						<< std::setw(10) << std::setprecision(4) << chi2[0] << " "
+						<< std::setw(10) << std::setprecision(4) << chi2[1] << " "
+						<< std::setw(10) << std::setprecision(4) << chi2[2] << " ";
+					//<< std::setw(10) << std::setprecision(4) << chi2[3] << " "
+				}
+
+				//downstream
+				{
+					Calc_divide_angle_lateral_inv(c, kinkpl, dal, rms_l, ave[0], asd[0]);
+					Calc_divide_angle_radial_inv(c, kinkpl, dar, rms_r, ave[1], asd[1]);
+					if (!isfinite(dal) || !isfinite(dar) || !isfinite(rms_l) || !isfinite(rms_r))continue;
+					chi2[0] = pow(dal / rms_l, 2);
+					chi2[1] = pow(dar / rms_r, 2);
+
+					Calc_divide_vph_inv(c, kinkpl, mean[0], sd[0], count[0], vph);
+					if (sd[0] > 0 && vph > 0) {
+						sigma0 = (vph - mean[0]) / sd[0];
+						chi2[2] = sigma0 * sigma0;
+					}
+					else {
+						sigma0 = -1;
+						chi2[2] = -1;
+					}
+					sigma[0] = sigma0;
+					Calc_divide_pixel_inv(c, kinkpl, mean[1], sd[1], count[1], hitnum);
+					if (sd[1] > 0 && hitnum > 0) {
+						sigma0 = (hitnum - mean[1]) / sd[1];
+						chi2[3] = sigma0 * sigma0;
+					}
+					else {
+						sigma0 = -1;
+						chi2[3] = -1;
+					}
+					sigma[1] = sigma0;
+					md = Calc_md_inv(c, kinkpl, dz);
+					ofs << std::fixed << std::right
+						<< std::setw(8) << std::setprecision(5) << ave[0] << " "
+						<< std::setw(8) << std::setprecision(5) << asd[0] << " "
+						<< std::setw(8) << std::setprecision(5) << rms_l << " "
+						<< std::setw(8) << std::setprecision(5) << ave[1] << " "
+						<< std::setw(8) << std::setprecision(5) << asd[1] << " "
+						<< std::setw(8) << std::setprecision(5) << rms_r << " ";
+
+					ofs << std::fixed << std::right
+						//<< std::setw(4) << std::setprecision(0) << count[0] << " "
+						<< std::setw(8) << std::setprecision(2) << mean[0] << " "
+						<< std::setw(6) << std::setprecision(3) << sd[0] << " "
+						//<< std::setw(8) << std::setprecision(2) << vph << " "
+						<< std::setw(6) << std::setprecision(2) << sigma[0] << " ";
+
+					//ofs << std::fixed << std::right
+					//	<< std::setw(4) << std::setprecision(0) << count[1] << " "
+					//	<< std::setw(8) << std::setprecision(2) << mean[1] << " "
+					//	<< std::setw(6) << std::setprecision(3) << sd[1] << " "
+					//	<< std::setw(8) << std::setprecision(2) << hitnum << " "
+					//	<< std::setw(6) << std::setprecision(2) << sigma[1] << " ";
+
+					ofs << std::fixed << std::right
+						<< std::setw(10) << std::setprecision(4) << chi2[0] << " "
+						<< std::setw(10) << std::setprecision(4) << chi2[1] << " "
+						<< std::setw(10) << std::setprecision(4) << chi2[2] << " ";
+					//<< std::setw(10) << std::setprecision(4) << chi2[3] << " "
+				}
+				//kink angle
+				ofs << std::fixed << std::right
+					<< std::setw(10) << std::setprecision(4) << dal << " "
+					<< std::setw(10) << std::setprecision(4) << dar << " "
+					<< std::setw(10) << std::setprecision(4) << md << " "
+					<< std::setw(10) << std::setprecision(4) << dz
+					<< std::endl;
+			
+
+			}
+		}
+
+	}
+}
+
+void Calc_divide_vph_inv(Momentum_recon::Mom_chain& c, int pl, double& mean, double& sd, int& count, double& vph) {
+	//upstream-->downstream
+	vph = -1;
+	count = 0;
+	double sum2 = 0, sum1 = 0;
+	bool flg = true;
+	for (auto itr = c.base.rbegin(); itr != c.base.rend(); itr++) {
+		if (itr->pl > pl) {
+			for (int i = 0; i < 2; i++) {
+				count += 1;
+				sum1 += itr->m[i].ph % 10000;
+				sum2 += pow(itr->m[i].ph % 10000, 2);
+			}
+		}
+		else {
+			if (flg) {
+				vph = (itr->m[0].ph % 10000 + itr->m[1].ph % 10000) / 2;
+				flg = false;
+
+			}
+		}
+	}
+	if (count < 2) {
+		mean = -1;
+		sd = -1;
+	}
+	else {
+		mean = sum1 / count;
+		sd = sum2 / count - mean * mean;
+		if (sd <= 0) {
+			mean = -1;
+			sd = -1;
+		}
+		else {
+			sd = sqrt(sd) * sqrt(count - 1) / sqrt(count);
+		}
+
+	}
+}
+void Calc_divide_pixel_inv(Momentum_recon::Mom_chain& c, int pl, double& mean, double& sd, int& count, double& hitnum) {
+	hitnum = -1;
+	count = 0;
+	double sum2 = 0., sum1 = 0;
+	bool flg = true;
+	for (auto itr = c.base.rbegin(); itr != c.base.rend(); itr++) {
+		if (itr->pl > pl) {
+			for (int i = 0; i < 2; i++) {
+				if (itr->m[i].hitnum < 0)continue;
+				count += 1;
+				sum1 += itr->m[i].hitnum;
+				sum2 += pow(itr->m[i].hitnum, 2);
+			}
+		}
+		else {
+			if (flg) {
+				if (itr->m[0].hitnum > 0 && itr->m[1].hitnum > 0) {
+					hitnum = (itr->m[0].hitnum + itr->m[1].hitnum) / 2;
+				}
+				else if (itr->m[0].hitnum > 0) {
+					hitnum = itr->m[0].hitnum;
+				}
+				else if (itr->m[1].hitnum > 0) {
+					hitnum = itr->m[1].hitnum;
+				}
+				else {
+					hitnum = -1;
+				}
+				flg = false;
+			}
+		}
+	}
+	if (count < 2) {
+		mean = -1;
+		sd = -1;
+	}
+	else {
+		mean = sum1 / count;
+		sd = sum2 / count - mean * mean;
+		if (sd <= 0) {
+			mean = -1;
+			sd = -1;
+		}
+		else {
+			sd = sqrt(sd) * sqrt(count - 1) / sqrt(count);
+		}
+
+	}
+}
+void Calc_divide_angle_lateral_inv(Momentum_recon::Mom_chain& c, int pl, double& dal, double& rms,double& ave,double&sd) {
+	dal = NAN;
+
+	double sum1 = 0;
+	double ax, ay, dax, day, dang, angle, sum2 = 0;
+	int count = 0;
+	for (auto itr = c.base_pair.rbegin(); itr != c.base_pair.rend(); itr++) {
+		//std::cout << "inv:\npl_first=" << itr->first.pl << "\tpl_second=" << itr->second.pl << std::endl;
+		//pl:first<second
+		ax = itr->first.ax;
+		ay = itr->first.ay;
+		angle = sqrt(ax * ax + ay * ay);
+		dax = itr->second.ax - ax;
+		day = itr->second.ay - ay;
+		if (angle < 0.01) {
+			dang = dax;
+		}
+		else {
+			dang = (dax * ay - day * ax) / angle;
+		}
+		if (itr->first.pl == pl) {
+			dal = dang;//kink_angke
+		}
+		else if (itr->first.pl > pl) {
+			sum2 += dang * dang;
+			sum1 += dang;
+			count++;
+		}
+	}
+	if (count <= 1) {
+		rms = NAN;
+		sum1 = NAN;
+	}
+	else {
+		rms = sqrt(sum2 / count);
+		ave = sum1 / count;
+		sd = sum2 / count - ave * ave;
+		if (sd <= 0) {
+			ave = -1;
+			sd = -1;
+		}
+		else {
+			sd = sqrt(sd) * sqrt(count - 1) / sqrt(count);
+		}
+	}
+
+
+
+
+}
+void Calc_divide_angle_radial_inv(Momentum_recon::Mom_chain& c, int pl, double& dar, double& rms, double& ave, double& sd) {
+	dar = NAN;
+	double ax, ay, dax, day, dang, angle, sum2 = 0,sum1=0;
+	int count = 0;
+	for (auto itr = c.base_pair.rbegin(); itr != c.base_pair.rend(); itr++) {
+		ax = itr->first.ax;
+		ay = itr->first.ay;
+		angle = sqrt(ax * ax + ay * ay);
+		dax = itr->second.ax - ax;
+		day = itr->second.ay - ay;
+		if (angle < 0.01) {
+			dang = day;
+		}
+		else {
+			dang = (dax * ax + day * ay) / angle;
+		}
+		if (itr->first.pl == pl) {
+			dar = dang;
+		}
+		else if (itr->first.pl > pl) {
+			sum2 += dang * dang;
+			sum1 += dang;
+			count++;
+		}
+	}
+	if (count <= 1) {
+		rms = NAN;
+	}
+	else {
+		rms = sqrt(sum2 / count);
+		ave = sum1 / count;
+		sd = sum2 / count - ave * ave;
+		if (sd <= 0) {
+			ave = -1;
+			sd = -1;
+		}
+		else {
+			sd = sqrt(sd) * sqrt(count - 1) / sqrt(count);
+		}
+	}
+
+}
+double Calc_md_inv(Momentum_recon::Mom_chain& c, int pl, double& dz) {
+	double md = -1;
+	for (auto itr = c.base_pair.rbegin(); itr != c.base_pair.rend(); itr++) {
+		if (pl == itr->first.pl) {
+			matrix_3D::vector_3D pos0, pos1, dir0, dir1;
+			pos0.x = itr->first.x;
+			pos0.y = itr->first.y;
+			pos0.z = itr->first.z;
+			dir0.x = itr->first.ax;
+			dir0.y = itr->first.ay;
+			dir0.z = 1;
+			pos1.x = itr->second.x;
+			pos1.y = itr->second.y;
+			pos1.z = itr->second.z;
+			dir1.x = itr->second.ax;
+			dir1.y = itr->second.ay;
+			dir1.z = 1;
+			double extra[2], z_range[2];
+			z_range[0] = pos0.z;
+			z_range[1] = pos1.z;
+			md = matrix_3D::minimum_distance(pos0, pos1, dir0, dir1, z_range, extra);
+			dz = (fabs(extra[0]) + fabs(extra[1])) / 2;
+			return md;
+
+		}
+	}
+	return md;
+}
