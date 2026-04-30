@@ -2,10 +2,11 @@
 #include <FILE_structure.hpp>
 
 std::vector<Momentum_recon::Event_information> merge_momch(std::vector<Momentum_recon::Event_information>& momch0, std::vector<Momentum_recon::Event_information>& momch1);
+std::vector<Momentum_recon::Event_information> merge_momch_overwrite(std::vector<Momentum_recon::Event_information>& momch0, std::vector<Momentum_recon::Event_information>& momch1);
 
 int main(int argc, char** argv) {
 	if (argc < 4) {
-		fprintf(stderr, "usage:file-in-momchain file-in-momchain file-out-momchain [overwrite mode]\nIf you set the overwrite mode flag to 1, \nany existing event will be overwritten with the values from the second file.\nIf not specified, the values from the first file will be output.\n");
+		fprintf(stderr, "\n  usage:file-in-momchain file-in-momchain file-out-momchain [overwrite mode]\n  argc = %d\n\n  If you set the overwrite mode flag to 1, \n  any existing event will be overwritten with the values from the second file.\n  If not specified, the values from the first file will be output.\n", argc);
 		exit(1);
 	}
 	std::string file_in_momch0 = argv[1];
@@ -20,7 +21,14 @@ int main(int argc, char** argv) {
 	momch0 = Momentum_recon::Read_Event_information_extension(file_in_momch0);
 	momch1 = Momentum_recon::Read_Event_information_extension(file_in_momch1);
 
-	std::vector<Momentum_recon::Event_information> m_momch = merge_momch(momch0, momch1);
+	std::vector<Momentum_recon::Event_information> m_momch;
+	if (argc == 4) {
+		m_momch = merge_momch(momch0, momch1);
+	}
+	else {
+
+		m_momch = merge_momch_overwrite(momch0, momch1);
+	}
 
 	Momentum_recon::Write_Event_information_extension(file_out_momch, m_momch);
 
